@@ -1,0 +1,115 @@
+"""
+FII / DII daily collector.
+
+Fetches the latest trading day's FII/FPI and DII cash-market buy, sell and net
+figures (Rs crore) from NSE and stores one record per date in
+data/fii_dii_daily.json.
+
+- Needs only the "requests" package.
+- NSE shows only the latest trading day, so this must run every trading day.
+- Safe to run many times: a date is stored once and refreshed.
+- Never invents numbers: if NSE data is missing or fails the checks, it stops.
+"""
+import json
+import os
+import sys
+from datetime import datetime
+
+import requests
+
+HOME = "https://www.nseindia.com"
+API = "https://www.nseindia.com/api/fiidiiTradeReact"
+OUT = os.path.join("data", "fii_dii_daily.json")
+HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/reports/fii-dii",
+}
+
+
+def fetch():
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    try:
+        r = s.get(HOME, timeout=30)
+        print("NSE homepage status:", r.status_code)
+    except Exception as e:  # noqa: BLE001
+        print("NSE homepage not reachable (continuing):", e)
+    r = s.get(API, timeout=30)
+    print("NSE API status:", r.status_code)
+    r.raise_for_status()
+    return r.json()
+
+
+def num(x):
+    return float(str(x).replace(",", "").strip())
+
+
+def build_record(rows):
+    fii = dii = None
+    for row in rows:
+        cat = str(row.get("category", "")).upper()
+        if "FII" in cat or "FPI" in cat:
+            fii = row
+        elif "DII" in cat:
+            dii = row
+    if not fii or not dii:
+        raise ValueError("FII or DII row missing in NSE answer")
+    d1 = datetime.strptime(fii["date"], "%d-%b-%Y")
+    d2 = datetime.strptime(dii["date"], "%d-%b-%Y")
+    if d1 != d2:
+        raise ValueError("FII and DII dates differ")
+    rec = {
+        "date": d1.strftime("%Y-%m-%d"),
+        "fii_buy": num(fii["buyValue"]), "fii_sell": num(fii["sellValue"]),
+        "fii_net": num(fii["netValue"]),
+        "dii_buy": num(dii["buyValue"]), "dii_sell": num(dii["sellValue"]),
+        "dii_net": num(dii["netValue"]),
+    }
+    rec["combined_net"] = round(rec["fii_net"] + rec["dii_net"], 2)
+    for who in ("fii", "dii"):
+        if abs(rec[who + "_buy"] - rec[who + "_sell"] - rec[who + "_net"]) > 1:
+            raise ValueError(who.upper() + " buy - sell does not match net")
+    rec["source"] = "NSE"
+    rec["retrieved_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    return rec
+
+
+def load():
+    if os.path.exists(OUT):
+        try:
+            with open(OUT, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:  # noqa: BLE001
+            print("Existing file unreadable; stopping so nothing is overwritten.")
+            sys.exit(1)
+    return []
+
+
+def main():
+    print("=" * 60)
+    print("FII/DII DAILY COLLECTOR")
+    print("=" * 60)
+    rec = build_record(fetch())
+    print(json.dumps(rec, indent=2))
+    hist = load()
+    new = not any(h.get("date") == rec["date"] for h in hist)
+    hist = [h for h in hist if h.get("date") != rec["date"]] + [rec]
+    hist.sort(key=lambda h: h["date"])
+    os.makedirs("data", exist_ok=True)
+    tmp = OUT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(hist, f, indent=1)
+    os.replace(tmp, OUT)
+    print(("Added new trading day: " if new else "Refreshed: ") + rec["date"])
+    print("Historical records:", len(hist))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # noqa: BLE001
+        print("ERROR:", e)
+        raise
