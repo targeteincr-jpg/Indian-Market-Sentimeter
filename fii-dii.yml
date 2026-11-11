@@ -1,0 +1,68 @@
+name: FII DII Daily Collector
+
+on:
+  schedule:
+    # 13:30 UTC = 7:00 PM India time, Monday to Friday
+    - cron: "30 13 * * 1-5"
+    # 15:30 UTC = 9:00 PM India time: second try if NSE was late or refused the first
+    - cron: "30 15 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fii-dii-collector
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install requests
+
+      - name: Run collector (up to 3 tries, one minute apart)
+        run: |
+          for i in 1 2 3; do
+            if python fii_dii_collector.py; then
+              exit 0
+            fi
+            echo "Attempt $i failed. Waiting 60 seconds."
+            sleep 60
+          done
+          echo "All 3 attempts failed."
+          exit 1
+
+      - name: Save data into the repository
+        run: |
+          git config user.name "fii-dii-bot"
+          git config user.email "fii-dii-bot@users.noreply.github.com"
+          for i in 1 2 3; do
+            git add data/fii_dii_daily.json
+            if git diff --cached --quiet; then
+              echo "No change to save."
+              exit 0
+            fi
+            git commit -m "FII/DII data $(date -u +%F)"
+            if git pull --rebase && git push; then
+              echo "Saved."
+              exit 0
+            fi
+            echo "Clash with another save. Starting again from the latest file."
+            git rebase --abort 2>/dev/null || true
+            git fetch origin
+            git reset --hard origin/main
+            python fii_dii_collector.py
+          done
+          echo "Could not save after 3 tries."
+          exit 1
